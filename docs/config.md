@@ -134,20 +134,6 @@ ifconfig_vtnet0="inet 202.138.224.102/25"                    # management
 ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 advbase 1 advskew 100" # VIP
 ```
 
-Dual-stack — add `_ipv6` alias for IPv6 CARP on the same VHID:
-
-```bash
-# Node A (PRIMARY) — dual-stack
-ifconfig_vtnet0="inet 202.138.224.101 netmask 255.255.255.128"
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 pass SemutMerah advbase 1 advskew 0"
-ifconfig_vtnet1_ipv6="inet6 2403:9500:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 0"
-
-# Node B (SECONDARY) — dual-stack
-ifconfig_vtnet0="inet 202.138.224.102 netmask 255.255.255.128"
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 pass SemutMerah advbase 1 advskew 100"
-ifconfig_vtnet1_ipv6="inet6 2403:9500:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 100"
-```
-
 Multi-VHID — add aliases on `vtnet1`:
 
 ```bash
@@ -181,8 +167,6 @@ advskew 254 → interval 1.99s
 ```
 
 This enables **load balancing** for multi-group setups — each group can prefer a different node.
-
-> **Note:** When using `policy.state: master` and `policy.state: backup`, advskew can be the same (e.g. both 0) on all nodes. Failover priority is determined by `policy.state` rather than advskew comparison.
 
 ---
 

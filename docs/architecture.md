@@ -109,27 +109,6 @@ lower effective  → higher priority (more likely to be MASTER)
 
 ---
 
-## Dual-Stack VIP/CARP
-
-The agent supports dual-stack (IPv4 + IPv6) VIPs on the same VHID:
-
-- **GetVIP** — parses both `inet` and `inet6` lines for the configured VHID from `ifconfig`
-- **VIPExists** — also checks `inet6` lines when verifying VIP presence
-- **Email** — shows both VIPs on a single line: `VIP: 202.138.224.100, 2403:9500:2::100`
-- **CARP state** — CARP state applies to both address families on the same VHID
-- **Interface control** — `ifconfig <vip_iface> up/down` controls CARP for both address families simultaneously
-- **Demotion** — sysctl `net.inet.carp.demotion` is global, affects all VHIDs regardless of address family
-
-rc.conf example for dual-stack:
-```
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 pass SemutMerah advbase 1 advskew 0"
-ifconfig_vtnet1_ipv6="inet6 2403:9500:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 0"
-```
-
-The `_ipv6` suffix on the interface name is FreeBSD convention for adding an IPv6 CARP alias to the same interface and VHID.
-
----
-
 ## Runner Cycle (Every Interval)
 
 The agent's main loop (`runOnce()`) executes the following steps in order every N seconds:
@@ -147,7 +126,6 @@ The agent's main loop (`runOnce()`) executes the following steps in order every 
 │  ┌──────────────┐                                            │
 │  │ Read CARP    │ → ifconfig <vip_iface>                     │
 │  │ State        │ → MASTER / BACKUP / UNKNOWN                │
-│  │              │ → detects both IPv4 + IPv6 VIPs            │
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
@@ -159,34 +137,28 @@ The agent's main loop (`runOnce()`) executes the following steps in order every 
 │  │ Policy       │ → UNHEALTHY → demotion 255, iface DOWN     │
 │  │ Evaluate     │ → DEGRADED  → demotion 50,  iface UP      │
 │  │              │ → HEALTHY   → demotion 0,   iface UP      │
-│  │              │ → policy.state: auto/master/backup         │
+│  │              │ → Preempt: compare effective advskew       │
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
-│  ┌──────────────────────────────┐                            │
-│  │ Demotion + Interface Control │                            │
-│  │ (ordering fixed)             │                            │
-│  │                              │                            │
-│  │ → UP:   iface UP first,     │                            │
-│  │   then sysctl demotion      │                            │
-│  │   (kernel -240 on iface UP) │                            │
-│  │ → DOWN: sysctl demotion     │                            │
-│  │   first, then iface DOWN    │                            │
-│  │   (kernel +240 on iface DN) │                            │
-│  └──────────────┬───────────────┘                            │
-│                 ▼                                            │
+│  ┌──────────────┐                                            │
+│  │ Apply        │ → sysctl net.inet.carp.demotion = N       │
+│  │ Demotion     │                                            │
+│  └──────┬───────┘                                            │
+│         ▼                                                    │
+│  ┌──────────────┐                                            │
+│  │ Interface    │ → ifconfig <vip_iface> up/down             │
+│  │ Control      │ ← PRIMARY mechanism                       │
+│  └──────┬───────┘                                            │
+│         ▼                                                    │
 │  ┌──────────────┐                                            │
 │  │ Preempt      │ → if MASTER + peer healthy:                │
-│  │ Step-down    │   state=auto:  compare effective advskew   │
-│  │              │   state=master: NEVER step down            │
-│  │              │   state=backup: ALWAYS step down           │
-│  │              │   → ifconfig <vip_iface> down              │
+│  │ Step-down    │   compare peer_effective < my_effective →  │
+│  │              │   ifconfig <vip_iface> down                │
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
-│  │ Predict CARP │ → if BACKUP:                               │
-│  │ for Email    │   state=auto:  compare effective advskew   │
-│  │              │   state=master: predict MASTER             │
-│  │              │   state=backup: predict BACKUP             │
+│  │ Predict CARP │ → if BACKUP + our effective < peer          │
+│  │ for Email    │   → predict MASTER (deterministic)         │
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
@@ -197,25 +169,6 @@ The agent's main loop (`runOnce()`) executes the following steps in order every 
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
-
-### Demotion Ordering Fix
-
-**Why the ordering matters:**
-
-When the kernel detects a CARP interface state change, it automatically adjusts the global demotion counter:
-- **Interface UP** → kernel subtracts 240 from demotion
-- **Interface DOWN** → kernel adds 240 to demotion
-
-If the agent sets demotion first, then brings the interface UP, the kernel subtracts 240 from the newly-set value — producing a wrong final demotion.
-
-**Correct ordering:**
-
-| Case | Step 1 | Step 2 | Net effect |
-|------|--------|--------|------------|
-| **UP** (HEALTHY/DEGRADED) | Interface UP (kernel -240) | SetDemotion | demotion = desired value |
-| **DOWN** (UNHEALTHY) | SetDemotion | Interface DOWN (kernel +240) | demotion = desired + 240 |
-
-The extra +240 when going DOWN is harmless (the node should be unable to become MASTER anyway). The important fix is the UP case: previous code set demotion first, then brought interface UP — the kernel's -240 subtraction produced a demotion offset of `desired - (-240) = desired + 240`, which was wrong. Now: interface UP first (kernel subtracts 240 from whatever the current demotion is), then set demotion to the exact desired value.
 
 ---
 
@@ -292,7 +245,7 @@ Meaning the peer has strictly higher priority (lower effective advskew) to be MA
 
 **Cooldown:** Agent steps down at most once per 60 seconds to prevent flapping.
 
-### Complete Failover Flow (preempt + state=auto)
+### Complete Failover Flow
 
 ```
 Normal:
@@ -301,33 +254,35 @@ Normal:
 
 Step 1 — A dnsdist crash:
   T=0:   A dnsdist process exits
-  T=+5s: A agent: health=UNHEALTHY → demotion=255, vtnet1 DOWN
+  T=+5s: A agent: health=UNHEALTHY → ifconfig vtnet1 down
          A: vtnet1 DOWN → CARP MASTER → INIT → advertisement STOP
+         A: demotion=255 (supplementary)
   T=+5s: B: CARP timeout (~3s from A's last advertisement)
          B: BACKUP → MASTER ✅
          B: dnsdist serves traffic
 
 Step 2 — A dnsdist recovers:
   T=0:   A dnsdist starts
-  T=+5s: A agent: health=HEALTHY → vtnet1 UP first, demotion=0
+  T=+5s: A agent: health=HEALTHY → ifconfig vtnet1 up
          A: vtnet1 UP → CARP INIT → BACKUP (B is still MASTER)
+         A: demotion=0
   T=+5s: A agent sends notification (UNHEALTHY→HEALTHY)
          → CARP state predicted: MASTER (my_effective=0 < peer_effective=100)
          → will become MASTER after B steps down
 
 Step 3 — B step down (agent preempt):
-  T=+5s: B agent: policy=preempt, state=auto, MASTER, peer A HEALTHY
+  T=+5s: B agent: policy=preempt, MASTER, peer A HEALTHY
          B: my_effective=100, peer_effective=0
          → 0 < 100 → step down → ifconfig vtnet1 DOWN
          B: vtnet1 DOWN → CARP MASTER → INIT → advertisement STOP
   T=+8s: A: CARP timeout → BACKUP → MASTER ✅ (advskew 0, highest priority)
-  T=+10s: B agent: health=HEALTHY → vtnet1 UP first, demotion=0
+  T=+10s: B agent: health=HEALTHY → ifconfig vtnet1 up
           B: vtnet1 UP → CARP INIT → BACKUP (A is MASTER, advskew 0 < 100)
 
 Result: A is MASTER again ~15s after dnsdist recovers.
 ```
 
-### Failover Timeline (state=auto)
+### Failover Timeline Diagram
 
 ```
 Time  A (advskew=0)              B (advskew=100)
@@ -338,8 +293,7 @@ T+5s  vtnet1 DOWN                 BACKUP → MASTER (timeout)
 T+5s  ───────────────────────►   B is now MASTER
   ~   [UNHEALTHY state]
 T+15s dnsdist starts
-T+20s vtnet1 UP (first)
-      demotion=0 (then)
+T+20s vtnet1 UP
       CARP: INIT → BACKUP
       email: HEALTHY, MASTER(predicted)
 T+25s                               peer A HEALTHY
@@ -349,42 +303,9 @@ T+28s BACKUP → MASTER (timeout)   vtnet1 UP → BACKUP
 T+30s MASTER ✅                     BACKUP ✅
 ```
 
-### Failover Timeline (state=master / state=backup)
-
-Using `state: master` on Node A and `state: backup` on Node B — advskew can be identical (both 0):
-
-```
-Time  A (advskew=0, state=master)   B (advskew=0, state=backup)
-────  ──────────────────────────    ─────────────────────────────
-T=0   dnsdist crash
-T+5s  SetDemotion=255               BACKUP → MASTER (timeout)
-      vtnet1 DOWN                   serves traffic ✅
-      CARP: MASTER → INIT           (even state=backup becomes
-      advertisement STOP             MASTER when no healthy peer)
-  ~   [UNHEALTHY state]
-T+15s dnsdist starts
-T+20s vtnet1 UP (first)
-      demotion=0 (then)
-      CARP: INIT → BACKUP
-      email: HEALTHY, MASTER
-      (state=master, always predict MASTER)
-T+25s                               peer A HEALTHY
-                                    state=backup → ALWAYS step down
-                                    vtnet1 DOWN
-T+28s BACKUP → MASTER (timeout)   vtnet1 UP → BACKUP
-T+30s MASTER ✅                     BACKUP ✅
-```
-
-Key differences from state=auto:
-- Both nodes can use the **same advskew** (e.g. both 0) since priority is determined by `policy.state`, not advskew comparison
-- Node B steps down immediately upon seeing a healthy peer (no advskew comparison needed)
-- Node A always predicts MASTER in email when healthy
-
 ---
 
 ## Policy Decision Matrix
-
-### state=auto (default)
 
 | Condition | Demotion | VIP Interface | Preempt Action |
 |-----------|----------|---------------|----------------|
@@ -394,39 +315,9 @@ Key differences from state=auto:
 | HEALTHY, MASTER, no healthy peer | 0 | UP | — |
 | HEALTHY, MASTER, peer with lower effective advskew | 0 | UP | — (we have higher priority) |
 | HEALTHY, MASTER, peer with higher priority (lower effective advskew) | 0 | UP → DOWN | **Step down** via ifconfig down |
+| HEALTHY, MASTER, peer healthy but interface was DOWN | 0 | UP (brought up) | Step down already done in previous cycle |
 
-### state=master
-
-| Condition | Demotion | VIP Interface | Preempt Action |
-|-----------|----------|---------------|----------------|
-| UNHEALTHY (score < 40) | 255 | DOWN | — |
-| DEGRADED (score 40-79) | 50 | UP | — |
-| HEALTHY (score ≥ 80) | 0 | UP | **NEVER step down** |
-
-### state=backup
-
-| Condition | Demotion | VIP Interface | Preempt Action |
-|-----------|----------|---------------|----------------|
-| UNHEALTHY (score < 40) | 255 | DOWN | — |
-| DEGRADED (score 40-79) | 50 | UP | — |
-| HEALTHY, no healthy peer | 0 | UP | Becomes MASTER (only MASTER in cluster) |
-| HEALTHY, any healthy peer | 0 | UP → DOWN | **ALWAYS step down** |
-
-> All nodes **MUST** use `policy: preempt`. The `state` field fine-tunes preempt behavior. `sticky` mode would never step down, so the PRIMARY node would never reclaim MASTER after recovery.
-
----
-
-## policy.state
-
-`policy.state` controls the agent's preempt behavior independently of CARP advskew:
-
-| State | Behavior | Use case |
-|-------|----------|----------|
-| `auto` (default) | Compare effective advskew — step down only if peer has strictly lower effective advskew | General purpose, multi-node |
-| `master` | Intended MASTER — never steps down. Always reclaims MASTER when healthy. Email always predicts MASTER | PRIMARY in clear master/backup topology |
-| `backup` | Intended BACKUP — steps down if ANY healthy peer exists. Email never predicts MASTER | SECONDARY in clear master/backup topology |
-
-With `state: master`/`state: backup`, nodes can use identical advskew (even both 0) since `policy.state` overrides advskew comparison for failover priority. This simplifies configuration when you want a strict PRIMARY→BACKUP model.
+> All nodes **MUST** use `policy: preempt`. `sticky` mode would never step down, so the PRIMARY node would never reclaim MASTER after recovery.
 
 ---
 
@@ -450,22 +341,16 @@ Per-transition cooldown prevents spam. Same transition (e.g. `HEALTHY→UNHEALTH
 
 ### CARP State Prediction
 
-When a node recovers to HEALTHY and brings its VIP interface UP, the CARP state may temporarily be BACKUP (because the peer is still MASTER). The agent predicts the final CARP state:
+When a node recovers to HEALTHY and brings its VIP interface UP, the CARP state may temporarily be BACKUP (because the peer is still MASTER). The agent predicts the final CARP state by comparing effective advskew:
 
 ```
-state=auto:
-  If my_effective < all_healthy_peers_effective:
-    → I WILL become MASTER (either immediately or via peer preempt step-down)
-    → Email shows "MASTER"
-  If any peer has my_effective > peer_effective:
-    → Peer has higher priority, I should stay BACKUP
-    → Email shows "BACKUP"
+If my_effective < all_healthy_peers_effective:
+  → I WILL become MASTER (either immediately or via peer preempt step-down)
+  → Email shows "MASTER"
 
-state=master:
-  → Always predicts MASTER when healthy
-
-state=backup:
-  → Never predicts MASTER
+If any peer has my_effective > peer_effective:
+  → Peer has higher priority, I should stay BACKUP
+  → Email shows "BACKUP"
 ```
 
 This prevents misleading "CARP: BACKUP" in emails when the node will deterministically become MASTER.
@@ -482,7 +367,7 @@ Hostname:  gw1-main-dnsdist-bdg.melsa.net.id
 Node IP:   202.138.224.101
 
 ── VIP/CARP Interface (vtnet1) ──
-VIP:       202.138.224.100, 2403:9500:2::100
+VIP:       202.138.224.100
 CARP:      MASTER      ← predicted when deterministic
 
 State:     HEALTHY
@@ -509,8 +394,6 @@ Recent CARP/ARP messages from /var/log/messages:
 This is an automated notification from dnsdist-ha-agent.
 ```
 
-Note: VIP line now shows both IPv4 and IPv6 addresses for dual-stack configurations.
-
 ### CARP/ARP Log Tail
 
 The email includes the last 10 lines from `/var/log/messages` matching `carp:` or `arp:`. This gives immediate visibility into kernel-level CARP state transitions and ARP updates at the time of the event.
@@ -524,7 +407,7 @@ All nodes **MUST** use `policy: preempt`. This is the only mode that supports MA
 ### Preempt
 
 ```
-When MASTER + healthy peer with higher priority (lower effective advskew or policy.state):
+When MASTER + healthy peer with higher priority (lower effective advskew):
   → Step down: ifconfig <vip_iface> DOWN
   → Peer detects CARP timeout → becomes MASTER
   → Bring interface UP → stays BACKUP (peer has higher priority)

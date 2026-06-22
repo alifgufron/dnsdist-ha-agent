@@ -37,8 +37,6 @@ Physical interface mapping:
 
 ### 2. Configure /etc/rc.conf
 
-Single-stack example:
-
 ```bash
 # vtnet0 — management (static IP)
 ifconfig_vtnet0="inet 202.138.224.101/25"
@@ -55,24 +53,6 @@ defaultrouter="202.138.224.1"
 ```bash
 ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 advbase 1 advskew 100"
 ```
-
-Dual-stack example (Node A):
-
-```bash
-ifconfig_vtnet0="inet 202.138.224.101 netmask 255.255.255.128"
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 pass SemutMerah advbase 1 advskew 0"
-ifconfig_vtnet1_ipv6="inet6 2403:9500:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 0"
-```
-
-Dual-stack example (Node B):
-
-```bash
-ifconfig_vtnet0="inet 202.138.224.102 netmask 255.255.255.128"
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 pass SemutMerah advbase 1 advskew 100"
-ifconfig_vtnet1_ipv6="inet6 2403:9500:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 100"
-```
-
-> **Note:** When using `policy.state: master` and `policy.state: backup`, advskew can be the same (e.g. both 0) since failover priority is determined by policy.state rather than advskew.
 
 ### 3. Preempt sysctl (no need to set)
 
@@ -191,7 +171,7 @@ Port is extracted from `peer.port` config. Default HTTP (80) will not work.
 
 All nodes use **identical config** (`policy: preempt`). Only `bind` (management IP) and `peers` differ per node.
 
-### 2 Nodes — state=auto
+### 2 Nodes
 
 **Node A (202.138.224.101):**
 ```yaml
@@ -204,8 +184,7 @@ peer:
     - ip: "202.138.224.102"  # peer management IP
       name: "node-b"
 policy:
-  mode: "preempt"
-  state: "auto"
+  mode: "preempt"             # MUST be preempt on all nodes
 ```
 
 **Node B (202.138.224.102):**
@@ -219,42 +198,7 @@ peer:
     - ip: "202.138.224.101"  # peer management IP
       name: "node-a"
 policy:
-  mode: "preempt"
-  state: "auto"
-```
-
-### 2 Nodes — state=master / state=backup
-
-With `state: master` and `state: backup`, advskew can be identical (both 0) since policy.state determines priority.
-
-**Node A (PRIMARY, `state: master`):**
-```yaml
-peer:
-  enabled: true
-  bind: "202.138.224.101"
-  port: ":8845"
-  token: "${HA_TOKEN}"
-  peers:
-    - ip: "202.138.224.102"
-      name: "node-b"
-policy:
-  mode: "preempt"
-  state: "master"
-```
-
-**Node B (SECONDARY, `state: backup`):**
-```yaml
-peer:
-  enabled: true
-  bind: "202.138.224.102"
-  port: ":8845"
-  token: "${HA_TOKEN}"
-  peers:
-    - ip: "202.138.224.101"
-      name: "node-a"
-policy:
-  mode: "preempt"
-  state: "backup"
+  mode: "preempt"             # SAME preempt
 ```
 
 ### 3 Nodes
@@ -273,7 +217,6 @@ peer:
       name: "node-c"
 policy:
   mode: "preempt"
-  state: "auto"
 
 # Node B (10.0.0.2)
 peer:
@@ -288,14 +231,13 @@ peer:
       name: "node-c"
 policy:
   mode: "preempt"
-  state: "auto"
 ```
 
 ---
 
 ## Failover Scenarios
 
-### Normal Operation (state=auto)
+### Normal Operation
 
 ```
 A: vtnet1 UP, dnsdist HEALTHY (score 100)
@@ -307,18 +249,6 @@ B: vtnet1 UP, dnsdist HEALTHY (score 100)
    → CARP BACKUP (advskew 100 > 0)
 ```
 
-### Normal Operation (state=master / state=backup)
-
-```
-A: vtnet1 UP, dnsdist HEALTHY, state=master
-   → demotion 0, NEVER step down
-   → CARP MASTER
-
-B: vtnet1 UP, dnsdist HEALTHY, state=backup
-   → demotion 0, ALWAYS step down if peer healthy
-   → CARP BACKUP
-```
-
 ### Failover: dnsdist Crash on A (MASTER)
 
 ```
@@ -326,7 +256,8 @@ T=0:   A dnsdist crash
        A agent health=UNHEALTHY (score 0)
 
 T=+5s: A agent: decision = "unhealthy — demotion 255, vip_iface down"
-       → SetDemotion=255 first, then ifconfig vtnet1 down
+       → ifconfig vtnet1 down   (PRIMARY mechanism)
+       → sysctl demotion=255    (secondary)
        → CARP detects link down → advertisement STOP
 
 T=+5s: B agent: health=HEALTHY, peer A=UNHEALTHY
@@ -334,48 +265,24 @@ T=+5s: B agent: health=HEALTHY, peer A=UNHEALTHY
        → dnsdist B serves traffic
 ```
 
-### Restore: dnsdist Recovers on A (state=auto)
+### Restore: dnsdist Recovers on A (Agent Preempt)
 
 ```
 T=0:   A dnsdist start
        A agent health=HEALTHY (score 100)
 
-T=+5s: A agent: ifconfig vtnet1 up first, then demotion=0
+T=+5s: A agent: ifconfig vtnet1 up → CARP advskew 0
        → A sees B MASTER → A BACKUP
 
-T=+5s: B agent: policy=preempt, state=auto, MASTER, peer A HEALTHY
-       → B: my_effective > peer_effective → step down (cooldown 60s)
-       → ifconfig vtnet1 DOWN
+T=+5s: B agent: policy=preempt, MASTER, peer A HEALTHY
+       → **B step down: ifconfig vtnet1 DOWN** (cooldown 60s)
 
 T=+8s: A: CARP timeout (B stopped) → **A becomes MASTER** ✅ (advskew 0)
 
-T=+10s: B agent: health=HEALTHY → vtnet1 UP → demotion=0
-        → B BACKUP (advskew 100 > 0)
+T=+10s: B agent: health=HEALTHY → ifconfig vtnet1 UP
+       → B BACKUP (advskew 100 > 0)
 
 Result: A MASTER back in ~10s after dnsdist recovers.
-```
-
-### Restore: dnsdist Recovers on A (state=master / state=backup)
-
-```
-T=0:   A dnsdist start
-       A agent health=HEALTHY (score 100)
-
-T=+5s: A agent: vtnet1 UP first, demotion=0
-       → A sees B MASTER → A BACKUP
-       → email: HEALTHY, CARP=MASTER (state=master predicts MASTER)
-
-T=+5s: B agent: policy=preempt, state=backup, MASTER, peer A HEALTHY
-       → state=backup → ALWAYS step down
-       → ifconfig vtnet1 DOWN (no cooldown check needed)
-
-T=+8s: A: CARP timeout (B stopped) → **A becomes MASTER** ✅
-
-T=+10s: B agent: health=HEALTHY → vtnet1 UP → demotion=0
-        → B BACKUP (state=backup, yields to healthy peer)
-
-Result: A MASTER back in ~10s. Faster than state=auto because backup
-        steps down immediately (no advskew comparison, no cooldown).
 ```
 
 ### Node Total Failure (including agent)
@@ -392,30 +299,16 @@ When A comes back:
   → A agent: health=HEALTHY, vtnet1 UP
   → A BACKUP (B still MASTER)
   → B agent: policy=preempt, sees A HEALTHY → step down
-  → A becomes MASTER (advskew 0 or state=master)
+  → A becomes MASTER (advskew 0)
 ```
 
 ### Summary Table
-
-#### state=auto
 
 | Scenario | N1 (PRIMARY, advskew 0) | N2 (SECONDARY, advskew 100) | Result |
 |----------|------------------------|----------------------------|--------|
 | Both healthy | MASTER | BACKUP | **N1 MASTER** |
 | N1 crash | `vtnet1 DOWN` | MASTER | **N2 MASTER** (link down) |
 | N1 recovers | **UP** → BACKUP (wait) | MASTER → **step down** → UP | **N1 MASTER** (agent preempt) |
-| N2 crash | MASTER | `vtnet1 DOWN` | **N1 MASTER** |
-| N2 recovers | MASTER | **UP** → BACKUP | **N1 stays MASTER** |
-| Both crash | `DOWN` | `DOWN` | **No MASTER** |
-| N1 total failure | — | MASTER | **N2 MASTER** (timeout) |
-
-#### state=master / state=backup
-
-| Scenario | N1 (state=master) | N2 (state=backup) | Result |
-|----------|--------------------|--------------------|--------|
-| Both healthy | MASTER | BACKUP | **N1 MASTER** |
-| N1 crash | `vtnet1 DOWN` | MASTER | **N2 MASTER** (link down) |
-| N1 recovers | **UP** → BACKUP (wait) | MASTER → **step down** (immediate) | **N1 MASTER** |
 | N2 crash | MASTER | `vtnet1 DOWN` | **N1 MASTER** |
 | N2 recovers | MASTER | **UP** → BACKUP | **N1 stays MASTER** |
 | Both crash | `DOWN` | `DOWN` | **No MASTER** |
@@ -457,7 +350,7 @@ Hostname:  gw1-dnsdist-bdg
 Interface: vtnet0
 
 Node IP:   202.138.224.101
-VIP:       202.138.224.100, 2403:9500:2::100
+VIP:       202.138.224.100
 CARP:      BACKUP
 
 State:     UNHEALTHY
@@ -475,8 +368,6 @@ Reason: Failed: TCP :53 not responding, UDP :53 not responding, DNS query failed
 
 This is an automated notification from dnsdist-ha-agent.
 ```
-
-Note: VIP line shows all detected VIPs (IPv4 and IPv6) for the configured VHID.
 
 ---
 

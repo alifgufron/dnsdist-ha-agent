@@ -34,8 +34,6 @@ dnsdist runs on a single FreeBSD host. If dnsdist crashes or the host goes down,
 └─────────────────────────────────────────────────────┘
 ```
 
-Supports dual-stack (IPv4 + IPv6) VIPs on the same VHID. The agent detects both address families and shows all VIPs in email notifications.
-
 ## How It Works (One Cycle)
 
 ```
@@ -47,33 +45,24 @@ Supports dual-stack (IPv4 + IPv6) VIPs on the same VHID. The agent detects both 
 │                                                          │
 │  2. Read CARP state from ifconfig vtnet1                 │
 │     → MASTER / BACKUP / (INIT → UNKNOWN)                 │
-│     → detects both IPv4 and IPv6 VIPs                    │
 │                                                          │
 │  3. Query peer(s) via HTTP heartbeat                     │
 │     → peer score, CARP state, advskew, demotion          │
 │                                                          │
-│  4. Evaluate policy (preempt) + policy.state:            │
+│  4. Evaluate policy (preempt):                           │
 │     UNHEALTHY (<40)  → demotion 255, vtnet1 DOWN         │
 │     DEGRADED (40-79) → demotion 50,  vtnet1 UP           │
 │     HEALTHY (≥80)    → demotion 0,   vtnet1 UP           │
-│     policy.state: auto/master/backup                      │
 │                                                          │
-│  5. Apply demotion + interface (ordering fixed):         │
-│     → UP:   iface UP first, then sysctl demotion         │
-│     → DOWN: sysctl demotion first, then iface DOWN       │
+│  5. Preempt check (if MASTER + healthy peer):            │
+│     Compare effective advskew:                           │
+│       my_effective < peer_effective → step down          │
+│       my_effective ≥ peer_effective → stay MASTER        │
 │                                                          │
-│  6. Preempt check (if MASTER + healthy peer):            │
-│     state=auto:  compare effective advskew               │
-│     state=master: NEVER step down                        │
-│     state=backup: ALWAYS step down if peer healthy       │
+│  6. Send notification if state changed                   │
+│     → CARP state predicted when recovery is deterministic│
 │                                                          │
-│  7. Predict CARP state for email                         │
-│     state=master → always predicts MASTER when healthy   │
-│     state=backup → never predicts MASTER                 │
-│                                                          │
-│  8. Send notification if state changed                   │
-│                                                          │
-│  9. Log everything with timestamps and [TAG] prefixes    │
+│  7. Log everything with timestamps and [TAG] prefixes    │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -81,17 +70,15 @@ Supports dual-stack (IPv4 + IPv6) VIPs on the same VHID. The agent detects both 
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/architecture.md) | Full architecture: dual-interface, CARP failover, agent preempt, state machine, demotion ordering, runner cycle, policy.state, dual-stack |
-| [Configuration](docs/config.md) | All config fields, VHID, advskew, demotion values, policy modes, policy.state, dual-stack |
+| [Architecture](docs/architecture.md) | Full architecture: dual-interface, CARP failover, agent preempt, state machine, demotion, runner cycle, email prediction |
+| [Configuration](docs/config.md) | All config fields, VHID, advskew, demotion values, policy modes |
 | [Usage](docs/usage.md) | Build, install, verify, multi-node examples, failover scenarios, troubleshooting |
 
 ## Key Features
 
 - **Dual-interface** — management (`vtnet0`, always UP) + VIP/CARP (`vtnet1`, controlled by agent)
-- **Dual-stack** — detects both IPv4 and IPv6 VIPs for the same VHID, shows both in email
 - **Primary failover** — `ifconfig vtnet1 down` triggers CARP link failure (immediate, <1s)
 - **Agent-level preempt** — MASTER steps down via `ifconfig vtnet1 down` when peer has higher priority (replaces unreliable sysctl `net.inet.carp.preempt`)
-- **policy.state** — `auto` (compare advskew), `master` (never step down, always reclaim), `backup` (yield to any healthy peer)
 - **Effective advskew comparison** — compares `configured_advskew + demotion` with peer's `advskew + demotion` via heartbeat
 - **Health checks** — process pgrep, TCP :53, UDP :53, DNS query (miekg/dns), weighted scoring
 - **Peer protocol** — HTTP with shared secret auth (`X-HA-DDIST-TOKEN`), reports score + CARP state + advskew + demotion
@@ -111,37 +98,7 @@ Supports dual-stack (IPv4 + IPv6) VIPs on the same VHID. The agent detects both 
 ```bash
 # 1. Build
 GOOS=freebsd GOARCH=amd64 go build -o build/dnsdist-ha-agent-freebsd-amd64 ./cmd/dnsdist-ha-agent/main.go
-```
 
-Node A (PRIMARY, `policy.state=master`) — `/etc/rc.conf`:
-```
-ifconfig_vtnet0="inet 202.138.224.101 netmask 255.255.255.128"
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 pass SemutMerah advbase 1 advskew 0"
-ifconfig_vtnet1_ipv6="inet6 2403:9500:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 0"
-```
-
-Node B (SECONDARY, `policy.state=backup`) — `/etc/rc.conf`:
-```
-ifconfig_vtnet0="inet 202.138.224.102 netmask 255.255.255.128"
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 pass SemutMerah advbase 1 advskew 100"
-ifconfig_vtnet1_ipv6="inet6 2403:9500:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 100"
-```
-
-`/usr/local/etc/dnsdist-ha-agent.yaml` — Node A:
-```yaml
-policy:
-  mode: "preempt"
-  state: "master"
-```
-
-Node B:
-```yaml
-policy:
-  mode: "preempt"
-  state: "backup"
-```
-
-```bash
 # 2. Configure (edit configs/config.yaml and /etc/rc.conf — see docs/usage.md)
 # 3. Install
 cp build/dnsdist-ha-agent-freebsd-amd64 /usr/local/bin/dnsdist-ha-agent

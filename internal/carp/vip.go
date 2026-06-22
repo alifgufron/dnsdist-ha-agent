@@ -24,7 +24,7 @@ func VIPExists(iface, vip string) (bool, error) {
 	lines := strings.Split(result.Stdout, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "inet ") && strings.Contains(line, vipStr) {
+		if (strings.HasPrefix(line, "inet ") || strings.HasPrefix(line, "inet6 ")) && strings.Contains(line, vipStr) {
 			return true, nil
 		}
 	}

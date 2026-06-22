@@ -28,6 +28,8 @@ carp:
 
 policy:
   mode: "preempt"             # "preempt" | "sticky". MUST be "preempt" on all nodes for MASTER reclaim via agent-level preempt. "sticky" never steps down.
+  state: "auto"               # "auto" (default) | "master" | "backup". "master" → node always reclaims MASTER when healthy.
+                              #   "backup" → node yields to any healthy peer. The EvaluatePolicy will step down.
 
 peer:
   enabled: true

@@ -71,7 +71,8 @@ type PeerEntry struct {
 }
 
 type PolicyConfig struct {
-	Mode string `yaml:"mode"`
+	Mode  string `yaml:"mode"`
+	State string `yaml:"state"`
 }
 
 type NotifyConfig struct {
@@ -97,7 +98,7 @@ var knownKeys = map[string]map[string]bool{
 	"health": {"process_check": true, "tcp_check": true, "udp_check": true, "dns_query": true, "bind_address": true},
 	"carp":   {"demotion_healthy": true, "demotion_degraded": true, "demotion_unhealthy": true},
 	"peer":   {"enabled": true, "bind": true, "port": true, "token": true, "peers": true},
-	"policy": {"mode": true},
+	"policy": {"mode": true, "state": true},
 	"notify": {"email": true, "cooldown": true},
 }
 
@@ -223,7 +224,7 @@ func checkUnknownKeys(node *yaml.Node, prefix string) []string {
 
 		case "policy":
 			if _, ok := knownKeys["policy"][key]; !ok {
-				errs = append(errs, fmt.Sprintf("  line %d: unknown key %q under 'policy:' — valid: mode", keyNode.Line, key))
+				errs = append(errs, fmt.Sprintf("  line %d: unknown key %q under 'policy:' — valid: mode, state", keyNode.Line, key))
 			}
 
 		case "notify":

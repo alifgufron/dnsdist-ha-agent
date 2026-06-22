@@ -31,7 +31,8 @@ func (s State) String() string {
 }
 
 var carpStateRe = regexp.MustCompile(`carp:\s+(MASTER|BACKUP)`)
-var vhidVIPRe = regexp.MustCompile(`inet\s+(\S+)\s+.*vhid\s+(\d+)`)
+var vhidVIP4Re = regexp.MustCompile(`inet\s+(\S+)\s+.*vhid\s+(\d+)`)
+var vhidVIP6Re = regexp.MustCompile(`inet6\s+(\S+)\s+.*vhid\s+(\d+)`)
 var inetRe = regexp.MustCompile(`inet\s+(\S+)`)
 var advskewRe = regexp.MustCompile(`carp:.*vhid\s+(\d+).*advskew\s+(\d+)`)
 
@@ -85,19 +86,31 @@ func GetVIP(iface string, vhid int) (string, error) {
 		return "", fmt.Errorf("ifconfig %s: %w", iface, result.Err)
 	}
 
+	vhidStr := fmt.Sprintf("%d", vhid)
+	var vips []string
 	lines := strings.Split(result.Stdout, "\n")
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		matches := vhidVIPRe.FindStringSubmatch(line)
-		if matches != nil && matches[2] == fmt.Sprintf("%d", vhid) {
-			ip := net.ParseIP(matches[1])
-			if ip != nil {
-				return ip.String(), nil
+		matches := vhidVIP4Re.FindStringSubmatch(line)
+		if matches != nil && matches[2] == vhidStr {
+			if ip := net.ParseIP(matches[1]); ip != nil {
+				vips = append(vips, ip.String())
+			}
+		}
+		matches = vhidVIP6Re.FindStringSubmatch(line)
+		if matches != nil && matches[2] == vhidStr {
+			if ip := net.ParseIP(matches[1]); ip != nil {
+				vips = append(vips, ip.String())
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no VIP found for vhid %d on %s", vhid, iface)
+	if len(vips) == 0 {
+		return "", fmt.Errorf("no VIP found for vhid %d on %s", vhid, iface)
+	}
+
+	return strings.Join(vips, ", "), nil
 }
 
 func GetAdvskew(iface string, vhid int) (int, error) {

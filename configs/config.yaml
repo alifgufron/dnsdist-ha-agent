@@ -1,0 +1,53 @@
+# All config keys MUST be identical across all cluster nodes.
+# Only `peer.bind` (management IP) and `peers` list differ per node.
+# `peer.port` and `peer.token` MUST be identical on all nodes.
+# See docs/config.md for full field reference.
+
+log_file: /var/log/dnsdist-ha-agent.log  # optional — logs to stdout if empty
+
+agent:
+  interval: 5s
+  interface: "vtnet0"        # management interface — for node IP and peer communication
+  vip_interface: "vtnet1"    # VIP/CARP interface — agent brings it DOWN on unhealthy (triggers failover)
+  vhid: 1                    # CARP VHID — must match /etc/rc.conf
+
+health:
+  process_check: true
+  tcp_check: true
+  udp_check: true
+  dns_query:
+    enabled: true
+    domain: "google.com"
+    timeout: 2s
+  bind_address: "127.0.0.1:53"  # change if dnsdist listens on a public IP
+
+carp:
+  demotion_healthy: 0
+  demotion_degraded: 50
+  demotion_unhealthy: 255
+
+policy:
+  mode: "preempt"             # "preempt" | "sticky". MUST be "preempt" on all nodes for MASTER reclaim via agent-level preempt. "sticky" never steps down.
+
+peer:
+  enabled: true
+  bind: "10.0.0.1"           # IP of management interface — MUST be this node's own IP
+  port: ":8845"               # MUST be identical on all nodes
+  token: "${HA_TOKEN}"        # shared secret — MUST be identical on all nodes
+  peers:
+    - ip: "10.0.0.2"
+      name: "node-b"
+    - ip: "10.0.0.3"
+      name: "node-c"
+
+notify:
+  email:
+    enabled: true
+    smtp_host: "mail.example.com"
+    smtp_port: 587
+    username: "agent"
+    password: "${SMTP_PASS}"
+    from: "dnsdist-ha@example.com"
+    to:
+      - "admin@example.com"
+  cooldown: 5m

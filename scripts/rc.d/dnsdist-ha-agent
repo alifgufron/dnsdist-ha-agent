@@ -1,0 +1,60 @@
+#!/bin/sh
+
+# PROVIDE: dnsdist_ha_agent
+# REQUIRE: LOGIN NETWORKING carp
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="dnsdist_ha_agent"
+rcvar="dnsdist_ha_agent_enable"
+
+load_rc_config "$name"
+
+: ${dnsdist_ha_agent_enable:="NO"}
+: ${dnsdist_ha_agent_config:="/usr/local/etc/dnsdist-ha-agent.yaml"}
+: ${dnsdist_ha_agent_user:="root"}
+: ${dnsdist_ha_agent_group:="wheel"}
+
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/bin/dnsdist-ha-agent"
+command="/usr/sbin/daemon"
+command_args="-f -p ${pidfile} ${procname} -config ${dnsdist_ha_agent_config}"
+
+start_precmd="${name}_prestart"
+
+dnsdist_ha_agent_prestart() {
+	if [ ! -f "${dnsdist_ha_agent_config}" ]; then
+		echo "Config file ${dnsdist_ha_agent_config} not found"
+		return 1
+	fi
+}
+
+# Override status command to check pidfile manually
+status_cmd="${name}_status"
+dnsdist_ha_agent_status() {
+	if [ ! -f "${pidfile}" ]; then
+		echo "${name} is not running (no pidfile)."
+		return 1
+	fi
+
+	local pid
+	pid=$(cat "${pidfile}" 2>/dev/null | tr -d ' \t\r\n')
+	case "${pid}" in
+		""|*[!0-9]*)
+			echo "${name} is not running (invalid pidfile)."
+			return 1
+			;;
+	esac
+
+	if kill -0 "${pid}" 2>/dev/null; then
+		echo "${name} is running as pid ${pid}."
+		return 0
+	else
+		echo "${name} is not running (stale pidfile ${pidfile})."
+		rm -f "${pidfile}"
+		return 1
+	fi
+}
+
+run_rc_command "$1"

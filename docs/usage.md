@@ -39,19 +39,24 @@ Physical interface mapping:
 
 ```bash
 # vtnet0 — management (static IP)
-ifconfig_vtnet0="inet 202.138.224.101/25"
+ifconfig_vtnet0="inet 172.16.10.100/25"
 
 # vtnet1 — VIP/CARP
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 advbase 1 advskew 0"
+ifconfig_vtnet1="inet 172.16.10.10/25 vhid 1 advbase 1 advskew 0"
 
 # Default route via management interface
-defaultrouter="202.138.224.1"
+defaultrouter="172.16.10.1"
 ```
 
 **Node B (secondary)** — same but different advskew:
 
 ```bash
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 advbase 1 advskew 100"
+ifconfig_vtnet1="inet 172.16.10.10/25 vhid 1 advbase 1 advskew 100"
+```
+
+**Dual-stack:** add inet6 lines for each VHID (same VHID, same advskew):
+```bash
+ifconfig_vtnet1_ipv6="inet6  2603:9570:2::100/96 vhid 1 pass SemutMerah advbase 1 advskew 0"
 ```
 
 ### 3. Preempt sysctl (no need to set)
@@ -271,7 +276,8 @@ T=+5s: B agent: health=HEALTHY, peer A=UNHEALTHY
 T=0:   A dnsdist start
        A agent health=HEALTHY (score 100)
 
-T=+5s: A agent: ifconfig vtnet1 up → CARP advskew 0
+T=+5s: A agent: ifconfig vtnet1 up FIRST → kernel subtracts 240
+       → sysctl demotion=0 (kernel penalty eliminated)
        → A sees B MASTER → A BACKUP
 
 T=+5s: B agent: policy=preempt, MASTER, peer A HEALTHY

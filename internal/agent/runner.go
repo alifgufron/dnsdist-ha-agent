@@ -161,8 +161,7 @@ func (r *Runner) runOnce() {
 	}
 
 	policyMode := ParsePolicyMode(r.cfg.Policy.Mode)
-	policyState := ParsePolicyState(r.cfg.Policy.State)
-	decision := EvaluatePolicy(policyMode, policyState, healthResult.Score, carpState, peerHealths)
+	decision := EvaluatePolicy(policyMode, healthResult.Score, carpState, peerHealths)
 
 	vipIface := r.cfg.Agent.VIPInterface
 
@@ -170,6 +169,10 @@ func (r *Runner) runOnce() {
 	//
 	// FreeBSD CARP kernel automatically adds 240 to demotion when the
 	// VIP interface goes DOWN, and subtracts 240 when it comes UP.
+	//
+	// net.inet.carp.demotion is ADDITIVE — the written value is added to
+	// the current factor. SetDemotion reads current and computes delta.
+	//
 	// To reach the desired final demotion:
 	//   - Going DOWN: write demotion FIRST, then bring interface down
 	//     (kernel adds 240 on top → total = desired + 240)
@@ -236,45 +239,29 @@ func (r *Runner) runOnce() {
 		actualDemotion = demotion
 	}
 
-	// Step 2: Preempt step-down
-	//   - state=master: never step down (intended MASTER)
-	//   - state=backup: step down if ANY healthy peer exists
-	//   - state=auto:   compare effective advskew — only step down if peer has strictly lower
+	// Step 2: Preempt step-down — compare effective advskew
+	// Only step down if we are MASTER and a peer has strictly lower effective advskew (higher priority)
 	if policyMode == PolicyPreempt && !decision.DesiredIfaceDown && carpState == carp.StateMaster && currentState == StateHealthy {
-		if policyState == PolicyStateMaster {
-			// Intended MASTER — never step down
-		} else if policyState == PolicyStateBackup {
-			r.log.Info("[PREEMPT] stepping down — backup policy, yielding to peer",
-				"interface", vipIface,
-			)
-			if err := carp.InterfaceDown(vipIface); err != nil {
-				r.log.Error("[PREEMPT] failed to bring VIP interface down", "interface", vipIface, "error", err)
+		localAdvskew, _ := carp.GetAdvskew(vipIface, r.cfg.Agent.VHID)
+		for _, ph := range peerHealths {
+			if !ph.OK || ph.Score < 80 {
+				continue
 			}
-			r.lastIfaceDown = true
-			r.preemptCooldown = time.Now()
-		} else {
-			// PolicyStateAuto — compare effective advskew
-			localAdvskew, _ := carp.GetAdvskew(vipIface, r.cfg.Agent.VHID)
-			for _, ph := range peerHealths {
-				if !ph.OK || ph.Score < 80 {
-					continue
+			peerEffective := ph.Advskew + ph.Demotion
+			myEffective := localAdvskew + actualDemotion
+			if peerEffective < myEffective && time.Since(r.preemptCooldown) > 60*time.Second {
+				r.log.Info("[PREEMPT] stepping down — peer has higher priority",
+					"interface", vipIface,
+					"peer", ph.Name,
+					"peer_effective", peerEffective,
+					"my_effective", myEffective,
+				)
+				if err := carp.InterfaceDown(vipIface); err != nil {
+					r.log.Error("[PREEMPT] failed to bring VIP interface down", "interface", vipIface, "error", err)
 				}
-				peerEffective := ph.Advskew + ph.Demotion
-				myEffective := localAdvskew + actualDemotion
-				if peerEffective < myEffective && time.Since(r.preemptCooldown) > 60*time.Second {
-					r.log.Info("[PREEMPT] stepping down — peer has higher priority",
-						"interface", vipIface,
-						"peer", ph.Name,
-						"peer_effective", peerEffective,
-						"my_effective", myEffective,
-					)
-					if err := carp.InterfaceDown(vipIface); err != nil {
-						r.log.Error("[PREEMPT] failed to bring VIP interface down", "interface", vipIface, "error", err)
-					}
-					r.lastIfaceDown = true
-					r.preemptCooldown = time.Now()
-					break
-				}
+				r.lastIfaceDown = true
+				r.preemptCooldown = time.Now()
+				break
 			}
 		}
 	}
@@ -290,33 +277,25 @@ func (r *Runner) runOnce() {
 	notificationCarp = carpState
 
 	// Step 4: Predict final CARP state for notification
-	//   - state=master: always predict MASTER (intended MASTER)
-	//   - state=backup: never predict MASTER (intended BACKUP)
-	//   - state=auto: compare effective advskew — predict MASTER if no peer has higher priority
+	// When HEALTHY with interface UP and currently BACKUP, but our effective
+	// advskew is lower than ALL healthy peers, we WILL become MASTER
+	// (either immediately via CARP timeout, or after peer steps down via preempt).
 	if currentState == StateHealthy && notificationCarp == carp.StateBackup {
-		switch policyState {
-		case PolicyStateMaster:
-			notificationCarp = carp.StateMaster
-		case PolicyStateBackup:
-			// Stay BACKUP — no prediction needed
-		default:
-			// PolicyStateAuto — predict based on effective advskew
-			localAdvskew, err := carp.GetAdvskew(r.cfg.Agent.VIPInterface, r.cfg.Agent.VHID)
-			if err == nil {
-				myEffective := localAdvskew + actualDemotion
-				peerHasHigherPriority := false
-				for _, ph := range peerHealths {
-					if ph.OK && ph.Score >= 80 {
-						peerEffective := ph.Advskew + ph.Demotion
-						if peerEffective < myEffective {
-							peerHasHigherPriority = true
-							break
-						}
+		localAdvskew, err := carp.GetAdvskew(r.cfg.Agent.VIPInterface, r.cfg.Agent.VHID)
+		if err == nil {
+			myEffective := localAdvskew + actualDemotion
+			peerHasHigherPriority := false
+			for _, ph := range peerHealths {
+				if ph.OK && ph.Score >= 80 {
+					peerEffective := ph.Advskew + ph.Demotion
+					if peerEffective < myEffective {
+						peerHasHigherPriority = true
+						break
 					}
 				}
-				if !peerHasHigherPriority {
-					notificationCarp = carp.StateMaster
-				}
+			}
+			if !peerHasHigherPriority {
+				notificationCarp = carp.StateMaster
 			}
 		}
 	}

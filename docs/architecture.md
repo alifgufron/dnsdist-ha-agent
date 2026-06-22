@@ -9,10 +9,10 @@ Each node requires **2 physical interfaces**:
 │          FreeBSD Host            │
 │                                  │
 │  ┌───────────────────────────┐   │
-│  │    dnsdist-ha-agent        │   │
-│  │    (Go binary)             │   │
-│  └──────┬──────────┬──────────┘   │
-│         │          │              │
+│  │    dnsdist-ha-agent       │   │
+│  │    (Go binary)            │   │
+│  └──────┬──────────┬─────────┘   │
+│         │          │             │
 │  ┌──────┴────┐ ┌───┴────────┐    │
 │  │ vtnet0    │ │ vtnet1     │    │
 │  │ MANAGEMENT│ │ VIP/CARP   │    │
@@ -78,9 +78,19 @@ RECOVERED: vip_iface UP   → CARP INIT → BACKUP (initialization complete)
 - **MASTER** → Node is the active VIP owner. Sends advertisements.
 - **Timeout** → 3 × advbase (default 3 seconds). If MASTER stops advertising, BACKUP transitions to MASTER.
 
+### Dual-Stack VIP/CARP
+
+Both IPv4 and IPv6 VIPs on the same VHID are supported. The agent reads CARP
+state from `ifconfig <vip_interface>` — the CARP line is shared between address
+families. VIP detection scans both `inet` and `inet6` lines for the VHID.
+Email notifications show all VIPs (e.g. `VIP: 202.138.224.100, 2403:9500:2::100`).
+Interface up/down and demotion work identically for both address families.
+
 ### Secondary: Demotion (sysctl)
 
 `sysctl net.inet.carp.demotion` is set as supplementary information. Demotion adds to the effective advskew but does **not** trigger CARP state transition on its own — the CARP state machine only reacts to advertisement timeout, preempt trigger, or link state change, not demotion changes.
+
+**Important:** `net.inet.carp.demotion` is **additive** — the signed value written to sysctl is **added** to the current factor. The agent reads the current value, computes `delta = target - current`, and writes the delta. This ensures the final kernel value equals the desired target.
 
 | | advskew | demotion |
 |--|---------|----------|
@@ -119,8 +129,8 @@ The agent's main loop (`runOnce()`) executes the following steps in order every 
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────────┐                                            │
-│  │ Health Check │ → process alive, TCP :53, UDP :53, DNS    │
-│  │              │ → weighted score 0-100 (default 25 each)  │
+│  │ Health Check │ → process alive, TCP :53, UDP :53, DNS     │
+│  │              │ → weighted score 0-100 (default 25 each)   │
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
@@ -135,20 +145,32 @@ The agent's main loop (`runOnce()`) executes the following steps in order every 
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
 │  │ Policy       │ → UNHEALTHY → demotion 255, iface DOWN     │
-│  │ Evaluate     │ → DEGRADED  → demotion 50,  iface UP      │
-│  │              │ → HEALTHY   → demotion 0,   iface UP      │
+│  │ Evaluate     │ → DEGRADED  → demotion 50,  iface UP       │
+│  │              │ → HEALTHY   → demotion 0,   iface UP       │
 │  │              │ → Preempt: compare effective advskew       │
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
-│  ┌──────────────┐                                            │
-│  │ Apply        │ → sysctl net.inet.carp.demotion = N       │
-│  │ Demotion     │                                            │
-│  └──────┬───────┘                                            │
-│         ▼                                                    │
-│  ┌──────────────┐                                            │
-│  │ Interface    │ → ifconfig <vip_iface> up/down             │
-│  │ Control      │ ← PRIMARY mechanism                       │
-│  └──────┬───────┘                                            │
+│  ┌─────────────────────────────────────────┐                 │
+│  │ Apply demotion + Interface operations   │                 │
+│  │                                         │                 │
+│  │ Ordering critical: FreeBSD kernel auto- │                 │
+│  │ adds 240 on DOWN, subtracts 240 on UP.  │                 │
+│  │ net.inet.carp.demotion is ADDITIVE —    │                 │
+│  │ agent writes delta = target - current.  │                 │
+│  │                                         │                 │
+│  │ UNHEALTHY (DOWN):                       │                 │
+│  │   1. SetDemotion(255) FIRST             │                 │
+│  │      (writes +255 → current=255)        │                 │
+│  │   2. InterfaceDown()                    │                 │
+│  │      (kernel +240 → total=495)          │                 │
+│  │                                         │                 │
+│  │ HEALTHY (UP):                           │                 │
+│  │   1. InterfaceUp() FIRST                │                 │
+│  │      (kernel -240 → current=255)        │                 │
+│  │   2. SetDemotion(0)                     │                 │
+│  │      (current=255, target=0             │                 │
+│  │       → writes -255 → final=0)          │                 │
+│  └──────┬──────────────────────────────────┘                 │
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
 │  │ Preempt      │ → if MASTER + peer healthy:                │
@@ -157,12 +179,12 @@ The agent's main loop (`runOnce()`) executes the following steps in order every 
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
-│  │ Predict CARP │ → if BACKUP + our effective < peer          │
+│  │ Predict CARP │ → if BACKUP + our effective < peer         │
 │  │ for Email    │   → predict MASTER (deterministic)         │
 │  └──────┬───────┘                                            │
 │         ▼                                                    │
 │  ┌──────────────┐                                            │
-│  │ Notify       │ → if state changed: send email              │
+│  │ Notify       │ → if state changed: send email             │
 │  │ (optional)   │   → includes predicted CARP state          │
 │  │              │   → includes /var/log/messages CARP/ARP    │
 │  └──────────────┘                                            │
@@ -182,7 +204,7 @@ HEALTHY (score >= 80)      → demotion 0,  vip_iface UP
 DEGRADED (score >= 40)     → demotion 50,  vip_iface UP
     │
     │ score drops below 40  │ score recovers above 80
-    ▼                        │
+    ▼                       │
 UNHEALTHY (score < 40) ─────┘ → demotion 255, vip_iface DOWN
                                (triggers CARP failover)
 ```

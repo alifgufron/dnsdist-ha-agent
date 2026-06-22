@@ -37,7 +37,6 @@ peer:
 
 policy:
   mode: "preempt"                   # "preempt" | "sticky". MUST be "preempt" on all nodes.
-  state: "auto"                     # "auto" | "master" | "backup". Optional — fine-tunes preempt behavior.
 
 notify:
   email:
@@ -76,8 +75,7 @@ notify:
 | `peer.port` | Port for HTTP server, format `:PORT` (e.g. `":8845"`). **MUST be identical on all nodes** |
 | `peer.token` | Shared secret for authentication. Can be literal string or `${ENV_VAR}`. **MUST be identical on all nodes** |
 | `peer.peers` | List of other nodes. Each entry: `ip` (management IP) and `name` (optional label) |
-| `policy.mode` | `"preempt"` or `"sticky"`. **WAJIB `"preempt"`** on all nodes. Only `"preempt"` supports MASTER reclaim via agent-level preempt. `"sticky"` never steps down |
-| `policy.state` | `"auto"` (default), `"master"`, or `"backup"`. Fine-tunes preempt behavior. `"master"` → never step down, reclaim MASTER when healthy. `"backup"` → yield to any healthy peer. `"auto"` → compare effective advskew |
+| `policy.mode` | `"preempt"` or `"sticky"`. **MUST be `"preempt"`** on all nodes. Only `"preempt"` supports MASTER reclaim via agent-level preempt. `"sticky"` never steps down |
 | `notify.email.*` | SMTP configuration |
 | `notify.email.smtp_host` | SMTP server hostname |
 | `notify.email.smtp_port` | SMTP server port (587 for STARTTLS, 465 for SSL) |
@@ -126,21 +124,31 @@ In `/etc/rc.conf`, each VHID is one `ifconfig_xxx_alias<N>` entry:
 
 ```bash
 # Node A (PRIMARY)
-ifconfig_vtnet0="inet 202.138.224.101/25"                    # management
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 advbase 1 advskew 0"  # VIP
+ifconfig_vtnet0="inet 172.16.10.100/25"                               # management
+ifconfig_vtnet1="inet 172.16.10.10/25 vhid 1 advbase 1 advskew 0"     # VIP
 
 # Node B (SECONDARY)
-ifconfig_vtnet0="inet 202.138.224.102/25"                    # management
-ifconfig_vtnet1="inet 202.138.224.100/25 vhid 1 advbase 1 advskew 100" # VIP
+ifconfig_vtnet0="inet 172.16.10.101/25"                               # management
+ifconfig_vtnet1="inet 172.16.10.10/25 vhid 1 advbase 1 advskew 100"   # VIP
 ```
 
 Multi-VHID — add aliases on `vtnet1`:
 
 ```bash
 # Node A — two VHIDs on vtnet1
-ifconfig_vtnet1_alias0="inet 202.138.224.100/25 vhid 1 advbase 1 advskew 0"
-ifconfig_vtnet1_alias1="inet 202.138.224.200/25 vhid 2 advbase 1 advskew 100"
+ifconfig_vtnet1_alias0="inet 172.16.10.10/25 vhid 1 advbase 1 advskew 0"
+ifconfig_vtnet1_alias1="inet 172.16.10.20/25 vhid 2 advbase 1 advskew 100"
 ```
+
+Dual-stack — IPv6 VIP is added as an alias on the same interface with the
+same VHID:
+
+```bash
+ifconfig_vtnet1_alias0="inet 172.16.10.10/25 vhid 1 advbase 1 advskew 0"
+ifconfig_vtnet1_ipv6="inet6 2603:9570:2::100/96 vhid 1 advbase 1 advskew 0"
+```
+
+CARP state, failover, and demotion work identically for IPv4 and IPv6.
 
 **VHID in config (`vhid: 1`) must match `/etc/rc.conf`.** The agent only uses VHID for logging.
 
@@ -209,31 +217,11 @@ Example:
 
 | Mode | Behavior | Use case |
 |------|----------|----------|
-| `preempt` | MASTER steps down (via agent) when peer is healthy | **WAJIB.** Enables MASTER reclaim after recovery |
+| `preempt` | MASTER steps down (via agent) when peer is healthy | **REQUIRED.** Enables MASTER reclaim after recovery |
 | `sticky` | MASTER stays MASTER regardless of peer health | Not recommended. PRIMARY cannot reclaim MASTER after failover |
 
 **All nodes MUST use `preempt`.** This is the only mode where a recovered PRIMARY node can reclaim MASTER from a SECONDARY.
 
 The agent-level preempt works by having the current MASTER bring its `vip_interface` DOWN when it detects a healthy peer with higher priority (lower advskew). This causes CARP failover back to the PRIMARY.
 
-## Policy State
 
-`policy.state` fine-tunes the preempt behavior for deterministic failover:
-
-| State | Behavior | Use case |
-|-------|----------|----------|
-| `auto` (default) | Compare effective advskew — step down only if peer has strictly lower effective advskew | General purpose |
-| `master` | Intended MASTER — never steps down. Always reclaims MASTER when healthy | PRIMARY node in master/backup topology |
-| `backup` | Intended BACKUP — steps down if ANY healthy peer exists | SECONDARY node in master/backup topology |
-
-The `master` and `backup` states provide **deterministic** failover behavior regardless of advskew configuration. Use them when you want a clear PRIMARY/BACKUP topology without relying on CARP advskew comparison.
-
-For `state: master` on the PRIMARY:
-- When healthy, the agent keeps demotion=0 and interface UP
-- The agent **never** steps down via preempt, even if a peer has lower advskew
-- The email notification always predicts MASTER when healthy
-
-For `state: backup` on the SECONDARY:
-- When healthy + any peer is also healthy, the agent sets demotion=50 (reduces priority)
-- The agent steps down immediately if any healthy peer exists
-- The email notification never predicts MASTER

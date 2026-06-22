@@ -2,6 +2,9 @@
 
 Go agent for dnsdist high-availability on FreeBSD via CARP interface control.
 
+Supports dual-stack (IPv4 + IPv6) VIPs on the same VHID. The agent detects both
+address families and shows all VIPs in email notifications.
+
 ## Problem
 
 dnsdist runs on a single FreeBSD host. If dnsdist crashes or the host goes down, DNS resolution stops. Traditional CARP only fails over on **host-level** failure (advertisement timeout). This agent adds **service-level** failover: if dnsdist is unhealthy (process dead, port down, DNS not resolving), the agent brings the CARP VIP interface DOWN, triggering immediate takeover by a healthy peer.
@@ -14,17 +17,17 @@ dnsdist runs on a single FreeBSD host. If dnsdist crashes or the host goes down,
 │                                                     │
 │   ┌─────────────────────────────────────────┐       │
 │   │           dnsdist-ha-agent              │       │
-│   │  ┌──────────┐  ┌──────────┐  ┌───────┐ │       │
-│   │  │ Health   │→ │ Policy   │→ │ CARP  │ │       │
-│   │  │ Checks   │  │ Engine   │  │Control│ │       │
-│   │  └──────────┘  └──────────┘  └───┬───┘ │       │
-│   │          ↑                       │     │       │
-│   │     ┌────┴────┐                  │     │       │
-│   │     │  Peer   │◄─────────────────┘     │       │
-│   │     │ Heartbeat│                       │       │
-│   │     └─────────┘                       │       │
+│   │  ┌──────────┐  ┌──────────┐  ┌───────┐  │       │
+│   │  │ Health   │→ │ Policy   │→ │ CARP  │  │       │
+│   │  │ Checks   │  │ Engine   │  │Control│  │       │
+│   │  └──────────┘  └──────────┘  └───┬───┘  │       │
+│   │          ↑                       │      │       │
+│   │     ┌────┴────┐                  │      │       │
+│   │     │  Peer   │◄─────────────────┘      │       │
+│   │     │Heartbeat│                         │       │
+│   │     └─────────┘                         │       │
 │   └─────────────────────────────────────────┘       │
-│                    │           │                     │
+│                    │          │                     │
 │              ┌─────┴────┐ ┌───┴────────────┐        │
 │              │ vtnet0   │ │ vtnet1         │        │
 │              │ MANAGEMT │ │ VIP/CARP       │        │
@@ -45,6 +48,7 @@ dnsdist runs on a single FreeBSD host. If dnsdist crashes or the host goes down,
 │                                                          │
 │  2. Read CARP state from ifconfig vtnet1                 │
 │     → MASTER / BACKUP / (INIT → UNKNOWN)                 │
+│     → detects both IPv4 and IPv6 VIPs                    │
 │                                                          │
 │  3. Query peer(s) via HTTP heartbeat                     │
 │     → peer score, CARP state, advskew, demotion          │
@@ -54,15 +58,23 @@ dnsdist runs on a single FreeBSD host. If dnsdist crashes or the host goes down,
 │     DEGRADED (40-79) → demotion 50,  vtnet1 UP           │
 │     HEALTHY (≥80)    → demotion 0,   vtnet1 UP           │
 │                                                          │
-│  5. Preempt check (if MASTER + healthy peer):            │
+│  5. Apply demotion + interface (ordering fixed):         │
+│     → UP:   iface UP first, then sysctl demotion         │
+│     → DOWN: sysctl demotion first, then iface DOWN       │
+│     (kernel auto-adds 240 on DOWN, subtracts on UP)      │
+│                                                          │
+│  6. Preempt check (if MASTER + healthy peer):            │
 │     Compare effective advskew:                           │
-│       my_effective < peer_effective → step down          │
-│       my_effective ≥ peer_effective → stay MASTER        │
+│       peer_effective < my_effective → step down          │
+│       peer_effective ≥ my_effective → stay MASTER        │
 │                                                          │
-│  6. Send notification if state changed                   │
-│     → CARP state predicted when recovery is deterministic│
+│  7. Predict CARP state for email                         │
+│     → if BACKUP but our effective advskew < all peers,   │
+│       predict MASTER (deterministic transition)          │
 │                                                          │
-│  7. Log everything with timestamps and [TAG] prefixes    │
+│  8. Send notification if state changed                   │
+│                                                          │
+│  9. Log everything with timestamps and [TAG] prefixes    │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -77,6 +89,7 @@ dnsdist runs on a single FreeBSD host. If dnsdist crashes or the host goes down,
 ## Key Features
 
 - **Dual-interface** — management (`vtnet0`, always UP) + VIP/CARP (`vtnet1`, controlled by agent)
+- **Dual-stack** — detects both IPv4 and IPv6 VIPs for the same VHID, shows both in email
 - **Primary failover** — `ifconfig vtnet1 down` triggers CARP link failure (immediate, <1s)
 - **Agent-level preempt** — MASTER steps down via `ifconfig vtnet1 down` when peer has higher priority (replaces unreliable sysctl `net.inet.carp.preempt`)
 - **Effective advskew comparison** — compares `configured_advskew + demotion` with peer's `advskew + demotion` via heartbeat
@@ -88,7 +101,7 @@ dnsdist runs on a single FreeBSD host. If dnsdist crashes or the host goes down,
 
 ## Prerequisites
 
-- FreeBSD 13.x / 14.x
+- FreeBSD 14.x / 15.x
 - **2 physical interfaces**: management + VIP/CARP
 - CARP configured on VIP interface (not management)
 - Root access

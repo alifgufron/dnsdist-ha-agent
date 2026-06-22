@@ -7,10 +7,29 @@ import (
 	"github.com/anomalyco/dnsdist-ha-agent/internal/util"
 )
 
-func SetDemotion(level int) error {
-	result := util.Exec("sysctl", fmt.Sprintf("net.inet.carp.demotion=%d", level))
+// SetDemotion adjusts demotion so the final kernel value equals the target.
+// FreeBSD's net.inet.carp.demotion is ADDITIVE: the value written is added to
+// the current factor. To reach an absolute target we must write:
+//
+//	delta = target - current
+//
+// Example: current=765, target=0 → write -765 → kernel subtracts 765 → 0.
+func SetDemotion(target int) error {
+	current, err := GetDemotion()
+	if err != nil {
+		// Fallback — write target as delta from 0
+		return writeDemotion(target)
+	}
+	if current == target {
+		return nil
+	}
+	return writeDemotion(target - current)
+}
+
+func writeDemotion(delta int) error {
+	result := util.Exec("sysctl", fmt.Sprintf("net.inet.carp.demotion=%d", delta))
 	if result.Err != nil {
-		return fmt.Errorf("set demotion %d: %w (stderr: %s)", level, result.Err, result.Stderr)
+		return fmt.Errorf("set demotion delta %d: %w (stderr: %s)", delta, result.Err, result.Stderr)
 	}
 	return nil
 }

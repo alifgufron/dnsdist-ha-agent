@@ -85,10 +85,6 @@ func Validate(cfg *Config) error {
 		errs = append(errs, fmt.Errorf("policy.mode must be 'sticky' or 'preempt', got %q", cfg.Policy.Mode))
 	}
 
-	if cfg.Policy.State != "" && cfg.Policy.State != "auto" && cfg.Policy.State != "master" && cfg.Policy.State != "backup" {
-		errs = append(errs, fmt.Errorf("policy.state must be 'auto', 'master', or 'backup', got %q", cfg.Policy.State))
-	}
-
 	if cfg.Notify.Email.Enabled {
 		if cfg.Notify.Email.SMTPHost == "" {
 			errs = append(errs, errors.New("notify.email.smtp_host is required when enabled"))

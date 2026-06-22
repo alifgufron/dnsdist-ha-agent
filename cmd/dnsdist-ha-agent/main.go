@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 
@@ -11,6 +12,10 @@ import (
 	"github.com/anomalyco/dnsdist-ha-agent/internal/config"
 	"github.com/anomalyco/dnsdist-ha-agent/internal/logger"
 )
+
+func logToSyslog(tag, msg string) {
+	exec.Command("logger", "-t", tag, msg).Run()
+}
 
 func main() {
 	configPath := flag.String("config", "/usr/local/etc/dnsdist-ha-agent.yaml", "path to config file")
@@ -27,6 +32,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\n")
 			for _, e := range errs {
 				fmt.Fprintf(os.Stderr, "  • %s\n", e)
+				logToSyslog("dnsdist-ha-agent", "config error: "+e)
 			}
 			fmt.Fprintf(os.Stderr, "\n")
 			fmt.Fprintf(os.Stderr, "  Fix the config and try again.\n")
@@ -46,6 +52,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "  File: %s\n", *configPath)
 		fmt.Fprintf(os.Stderr, "  %s\n", err)
+		logToSyslog("dnsdist-ha-agent", fmt.Sprintf("config error: %s", err))
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "  Fix the config and try again.\n")
 		fmt.Fprintf(os.Stderr, "\n")
